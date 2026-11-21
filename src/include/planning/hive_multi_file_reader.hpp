@@ -104,6 +104,18 @@ struct HiveScanInfo : public TableFunctionInfo {
 	bool LimitBound() const {
 		return limit_bound;
 	}
+	//! The partitions known without loading every one: Partitions() once loaded, otherwise the partitions of the pages
+	//! FetchPartitionPage fetched, in page order. Only appended to: once loaded, Partitions() starts with these in the
+	//! same order, so indexes into either stay valid
+	shared_ptr<const vector<GluePartitionInfo>> KnownPartitions() const;
+	//! The end, as an index into KnownPartitions(), of page 'page' of the table's partitions (the pages start at 0 and
+	//! each ends where the next starts), fetched from Glue (GetPartitions without segments) with the pages before it if
+	//! not yet. Invalid when it is not paged: past the last page, past LAZY_PARTITION_PAGES, or the partitions were
+	//! loaded otherwise. Fetching the last page loads the partitions: Partitions() is then the pages.
+	optional_idx FetchPartitionPage(ClientContext &context, idx_t page) const;
+	//! The pages FetchPartitionPage fetches at most, of 10, 100 and 1000 partitions. Past them the partitions are loaded
+	//! in full: a table that has more is read faster by the segmented load
+	static constexpr idx_t LAZY_PARTITION_PAGES = 3;
 
 private:
 	string FootersCacheKey(bool path_filtered) const;
@@ -114,6 +126,11 @@ private:
 	mutable annotated_mutex partitions_lock;
 	mutable shared_ptr<const vector<GluePartitionInfo>> partitions DUCKDB_GUARDED_BY(partitions_lock);
 	bool limit_bound = false;
+	//! For each page FetchPartitionPage fetched, the partitions of it and the pages before it, so page i ends at
+	//! pages[i]->size(). All are kept: GetPartitionOfFile hands out references into them
+	mutable vector<shared_ptr<const vector<GluePartitionInfo>>> pages DUCKDB_GUARDED_BY(partitions_lock);
+	//! The GetPartitions token of the next page, empty once the last one is fetched
+	mutable string next_page_token DUCKDB_GUARDED_BY(partitions_lock);
 };
 
 //! The data files of a Hive table, listed lazily: nothing is listed until the scan asks for files, and the filters on

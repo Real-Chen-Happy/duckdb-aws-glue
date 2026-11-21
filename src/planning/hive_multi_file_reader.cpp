@@ -1,4 +1,6 @@
 #include "planning/hive_multi_file_reader.hpp"
+#include "api/glue_api.hpp"
+#include "catalog/glue_catalog.hpp"
 #include "core/hive_location.hpp"
 #include "planning/hive_query_cache.hpp"
 #include "planning/stats/hive_stats.hpp"
@@ -16,6 +18,8 @@
 #include "duckdb/common/multi_file/table_function_multi_file.hpp"
 #include "duckdb/common/path.hpp"
 #include "duckdb/common/case_insensitive_map.hpp"
+#include "duckdb/common/set.hpp"
+#include "duckdb/main/client_config.hpp"
 #include "duckdb/common/serializer/deserializer.hpp"
 #include "duckdb/common/serializer/serializer.hpp"
 #include "duckdb/common/string_util.hpp"
@@ -90,6 +94,23 @@ idx_t HiveScanInfo::GetPartitionKeyIndex(const string &name) const {
 	return DConstants::INVALID_INDEX;
 }
 
+//! 'loaded' with the partitions of 'paged' first, in their order, so the indexes a paging file list attributed files
+//! with stay valid. A paged partition the load no longer has (dropped since) is kept: files may be attributed to it
+static shared_ptr<const vector<GluePartitionInfo>> PagesFirst(const vector<GluePartitionInfo> &paged,
+                                                              const vector<GluePartitionInfo> &loaded) {
+	auto result = make_shared_ptr<vector<GluePartitionInfo>>(paged);
+	set<vector<string>> seen;
+	for (auto &partition : paged) {
+		seen.insert(partition.values);
+	}
+	for (auto &partition : loaded) {
+		if (!seen.count(partition.values)) {
+			result->push_back(partition);
+		}
+	}
+	return std::move(result);
+}
+
 shared_ptr<const vector<GluePartitionInfo>> HiveScanInfo::Partitions(ClientContext &context) const {
 	annotated_lock_guard<annotated_mutex> guard(partitions_lock);
 	if (!partitions) {
@@ -99,6 +120,9 @@ shared_ptr<const vector<GluePartitionInfo>> HiveScanInfo::Partitions(ClientConte
 		} else {
 			GlueScanEvent event(Describe(), scan_id, "partitions");
 			partitions = HiveQueryCache::Get(context)->Partitions().Get(context, *this);
+			if (!pages.empty()) {
+				partitions = PagesFirst(*pages.back(), *partitions);
+			}
 			event.partitions = partitions->size();
 			event.Finish();
 			DUCKDB_LOG(context, GlueScanLogType, event);
@@ -110,6 +134,47 @@ shared_ptr<const vector<GluePartitionInfo>> HiveScanInfo::Partitions(ClientConte
 bool HiveScanInfo::PartitionsLoaded() const {
 	annotated_lock_guard<annotated_mutex> guard(partitions_lock);
 	return partitions != nullptr;
+}
+
+shared_ptr<const vector<GluePartitionInfo>> HiveScanInfo::KnownPartitions() const {
+	annotated_lock_guard<annotated_mutex> guard(partitions_lock);
+	if (partitions) {
+		return partitions;
+	}
+	if (!pages.empty()) {
+		return pages.back();
+	}
+	return make_shared_ptr<const vector<GluePartitionInfo>>();
+}
+
+optional_idx HiveScanInfo::FetchPartitionPage(ClientContext &context, idx_t page) const {
+	//! Small first: a LIMIT is often met by the first partition's files
+	static constexpr int PAGE_SIZES[LAZY_PARTITION_PAGES] = {10, 100, 1000};
+	annotated_lock_guard<annotated_mutex> guard(partitions_lock);
+	while (pages.size() <= page) {
+		bool last_fetched = !pages.empty() && next_page_token.empty();
+		if (partitions || last_fetched || pages.size() >= LAZY_PARTITION_PAGES || partition_keys.empty() ||
+		    catalog_name.empty()) {
+			return optional_idx();
+		}
+		GlueScanEvent event(Describe(), scan_id, "partition_page");
+		auto &catalog = Catalog::GetCatalog(context, Identifier(catalog_name)).Cast<GlueCatalog>();
+		auto fetched = pages.empty() ? make_shared_ptr<vector<GluePartitionInfo>>()
+		                             : make_shared_ptr<vector<GluePartitionInfo>>(*pages.back());
+		auto before = fetched->size();
+		next_page_token = GlueAPI::GetPartitionsPage(context, catalog, database_name, table_name,
+		                                             PAGE_SIZES[pages.size()], next_page_token, *fetched);
+		event.partitions = fetched->size() - before;
+		pages.push_back(std::move(fetched));
+		if (next_page_token.empty()) {
+			// every page is fetched: they are the partitions, in the order the file lists attributed files with
+			partitions = pages.back();
+		}
+		event.Finish();
+		event.detail = next_page_token.empty() ? "last" : "more";
+		DUCKDB_LOG(context, GlueScanLogType, event);
+	}
+	return pages[page]->size();
 }
 
 void HiveScanInfo::SetPartitions(vector<GluePartitionInfo> partitions_p) {
@@ -143,9 +208,12 @@ optional_idx HiveScanInfo::FindPartitionIndexOfFile(const string &path) const {
 const GluePartitionInfo &HiveScanInfo::GetPartitionOfFile(const string &path) const {
 	auto partition_index = GetPartitionIndexOfFile(path);
 	annotated_lock_guard<annotated_mutex> guard(partitions_lock);
-	// a file is attributed to a partition only after the partitions are loaded, and they are never replaced
-	D_ASSERT(partitions);
-	return (*partitions)[partition_index];
+	// a file is attributed to a partition only once it is known, and neither the loaded partitions nor the pages are
+	// ever released or reordered
+	D_ASSERT(partitions || !pages.empty());
+	auto &known = partitions ? *partitions : *pages.back();
+	D_ASSERT(partition_index < known.size());
+	return known[partition_index];
 }
 
 ErrorData HiveScanInfo::PartitionStorageMismatch(const GluePartitionInfo &partition) const {
