@@ -49,6 +49,8 @@ RACED_PARTITION_PREFIX = "fault_partition_elsewhere"
 NONCANONICAL_PREFIX = "fault_noncanonical_values"
 # BatchDeletePartition on a database with this prefix races another client dropping the partitions
 RACED_DROP_PREFIX = "fault_partition_dropped"
+# GetPartitions on a database with this prefix is paged as AWS pages it (MaxResults, NextToken), which moto does not
+PAGED_PARTITIONS_PREFIX = "fault_paged_partitions"
 # the TableInput fields of a Table that GetTable returns
 TABLE_INPUT_FIELDS = ("Name", "Description", "Owner", "Retention", "StorageDescriptor", "PartitionKeys",
                       "ViewOriginalText", "ViewExpandedText", "TableType", "Parameters", "TargetTable")
@@ -147,6 +149,21 @@ def as_other_clients_partitions(request):
     return json.dumps(other).encode()
 
 
+def is_paged_partitions(target, database):
+    return target == "AWSGlue.GetPartitions" and database.startswith(PAGED_PARTITIONS_PREFIX)
+
+
+def as_page(request, data):
+    """The page of the partitions at NextToken (an offset), at most MaxResults long, in the order of their values."""
+    partitions = sorted(json.loads(data).get("Partitions", []), key=lambda partition: partition.get("Values", []))
+    start = int(request.get("NextToken") or 0)
+    end = start + int(request.get("MaxResults") or 1000)
+    result = {"Partitions": partitions[start:end]}
+    if end < len(partitions):
+        result["NextToken"] = str(end)
+    return json.dumps(result).encode()
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -200,6 +217,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if target == "AWSGlue.GetTables" and status == 200:
             data = without_denied_tables(data)
+        if is_paged_partitions(target, database) and status == 200:
+            data = as_page(request, data)
         self.reply(status, headers, data)
 
     def forward(self, target, body):

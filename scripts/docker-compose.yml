@@ -29,7 +29,8 @@
 # AccessDeniedException, and GetTables leaves such tables out, as Lake Formation does for a table the caller may not
 # describe. BatchCreatePartition is delayed on a fault_slow_partitions* database (a timeout lands during registration)
 # and, on a fault_recreated_during_write* database, finds the table dropped and created again by another client and
-# then fails.
+# then fails. GetPartitions on a fault_paged_partitions* database is paged by MaxResults and NextToken, as AWS pages
+# it and moto does not.
 # 'link-proxy' (port 5557, GLUE_LINK_PROXY_ENDPOINT) forwards to moto as Glue answers through a database resource link
 # link_db whose target is target_db (scripts/resource_link_proxy.py).
 # 'glue-latency-proxy' (port 5558) and 's3-latency-proxy' (port 9101) forward to moto and S3 after a delay per request
