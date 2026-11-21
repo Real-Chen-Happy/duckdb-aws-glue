@@ -113,8 +113,8 @@ struct HiveScanInfo : public TableFunctionInfo {
 	//! not yet. Invalid when it is not paged: past the last page, past LAZY_PARTITION_PAGES, or the partitions were
 	//! loaded otherwise. Fetching the last page loads the partitions: Partitions() is then the pages.
 	optional_idx FetchPartitionPage(ClientContext &context, idx_t page) const;
-	//! The pages FetchPartitionPage fetches at most, of 10, 100 and 1000 partitions. Past them the partitions are loaded
-	//! in full: a table that has more is read faster by the segmented load
+	//! The pages FetchPartitionPage fetches at most, of 10, 100 and 1000 partitions. Past them the partitions are
+	//! loaded in full: a table that has more is read faster by the segmented load
 	static constexpr idx_t LAZY_PARTITION_PAGES = 3;
 
 private:
