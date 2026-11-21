@@ -257,16 +257,17 @@ static constexpr idx_t GLUE_DEFAULT_PARTITION_SEGMENTS = 8;
 static constexpr idx_t GLUE_MAX_PARTITION_SEGMENTS = 10;
 
 //! One GetPartitions request for segment 'segment_number' of a table (the whole table when 'total_segments' is 1):
-//! appends the page at 'next_token' to 'result' and returns the token of the next page, empty after the last one
+//! appends the page at 'next_token', at most 'max_results' partitions, to 'result' and returns the token of the next
+//! page, empty after the last one
 static Aws::String FetchPartitionPage(Aws::Glue::GlueClient &client, const GlueCatalog &catalog,
                                       const string &database_name, const string &table_name, int segment_number,
                                       int total_segments, const Aws::String &next_token,
-                                      vector<GluePartitionInfo> &result) {
+                                      vector<GluePartitionInfo> &result, int max_results = GLUE_PARTITIONS_PAGE_SIZE) {
 	Aws::Glue::Model::GetPartitionsRequest request;
 	SetCatalogId(request, catalog);
 	request.SetDatabaseName(database_name);
 	request.SetTableName(table_name);
-	request.SetMaxResults(GLUE_PARTITIONS_PAGE_SIZE);
+	request.SetMaxResults(max_results);
 	if (total_segments > 1) {
 		Aws::Glue::Model::Segment segment;
 		segment.SetSegmentNumber(segment_number);
@@ -512,6 +513,20 @@ vector<GluePartitionInfo> GlueAPI::GetPartitions(ClientContext &context, GlueCat
 		error.Throw();
 	}
 	return *table.partitions;
+}
+
+string GlueAPI::GetPartitionsPage(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+                                  const string &table_name, int max_results, const string &next_token,
+                                  vector<GluePartitionInfo> &result) {
+	if (max_results < 1 || max_results > GLUE_PARTITIONS_PAGE_SIZE) {
+		throw InternalException("GetPartitionsPage of '%s.%s': %d partitions per page, Glue allows 1 to %d",
+		                        database_name, table_name, max_results, GLUE_PARTITIONS_PAGE_SIZE);
+	}
+	GlueCallScope call_scope(context);
+	auto client = GlueAPI::GetClient(context, catalog);
+	Aws::String token(next_token.c_str(), next_token.size());
+	token = FetchPartitionPage(*client, catalog, database_name, table_name, 0, 1, token, result, max_results);
+	return ToStdString(token);
 }
 
 //! glue_debug_fail_partition_registration, '<error code>:<index>': the partition at 'index' of a registration and

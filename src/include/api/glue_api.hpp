@@ -147,6 +147,12 @@ public:
 	//! List the partitions of a Hive table (GetPartitions, all pages)
 	static vector<GluePartitionInfo> GetPartitions(ClientContext &context, GlueCatalog &catalog,
 	                                               const string &database_name, const string &table_name);
+	//! One page of the partitions of a Hive table (GetPartitions without segments): appends at most 'max_results'
+	//! partitions, those of the page at 'next_token' (the first page when empty), to 'result' and returns the token of
+	//! the next page, empty after the last one
+	static string GetPartitionsPage(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+	                                const string &table_name, int max_results, const string &next_token,
+	                                vector<GluePartitionInfo> &result);
 	//! GetPartitions of several tables, their requests run as tasks on DuckDB's threads. The first failed request
 	//! stops the requests not yet sent and is kept on its table; only an interrupt is thrown
 	static void GetPartitionsOfTables(ClientContext &context, GlueCatalog &catalog, vector<GluePartitionLoad> &tables);
