@@ -153,7 +153,8 @@ public:
 	const HiveScanInfo &ScanInfo() const {
 		return *scan_info;
 	}
-	//! HiveScanInfo::SetLimitBound for the planner, which reaches the scan info through the bound file list
+	//! HiveScanInfo::SetLimitBound for the planner, which reaches the scan info through the bound file list. Before
+	//! the list is first used: it decides then whether it pages
 	void SetLimitBound() {
 		scan_info->SetLimitBound();
 	}

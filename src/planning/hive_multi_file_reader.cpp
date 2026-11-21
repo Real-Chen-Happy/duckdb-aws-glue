@@ -19,7 +19,6 @@
 #include "duckdb/common/path.hpp"
 #include "duckdb/common/case_insensitive_map.hpp"
 #include "duckdb/common/set.hpp"
-#include "duckdb/main/client_config.hpp"
 #include "duckdb/common/serializer/deserializer.hpp"
 #include "duckdb/common/serializer/serializer.hpp"
 #include "duckdb/common/string_util.hpp"
@@ -748,20 +747,6 @@ void HiveMultiFileList::ListRoot(const vector<idx_t> &partitions) const {
 	}
 }
 
-//! Whether the scan is bound by a LIMIT. shortcut: the variable glue_test_limit_bound_scans marks every scan for the
-//! tests until the planner marks scans (SetLimitBound); drop it then
-static bool ScanIsLimitBound(ClientContext &context, const HiveScanInfo &info) {
-	if (info.LimitBound()) {
-		return true;
-	}
-	Value variable;
-	if (!ClientConfig::GetConfig(context).GetUserVariable(string("glue_test_limit_bound_scans"), variable) ||
-	    variable.IsNull()) {
-		return false;
-	}
-	return BooleanValue::Get(variable.DefaultCastAs(LogicalType::BOOLEAN));
-}
-
 bool HiveMultiFileList::Paging() const {
 	if (paging == PagingState::UNDECIDED) {
 		paging = PagingState::NOT_PAGING;
@@ -772,7 +757,7 @@ bool HiveMultiFileList::Paging() const {
 		}
 		// partitions a cache holds cost no request
 		if (every_partition && !planned && !scan_info->partition_keys.empty() && !scan_info->catalog_name.empty() &&
-		    ScanIsLimitBound(client_context, *scan_info) && !scan_info->PartitionsLoaded() &&
+		    scan_info->LimitBound() && !scan_info->PartitionsLoaded() &&
 		    !HiveQueryCache::Get(client_context)->Partitions().Cached(client_context, *scan_info)) {
 			paging = PagingState::PAGING;
 		}

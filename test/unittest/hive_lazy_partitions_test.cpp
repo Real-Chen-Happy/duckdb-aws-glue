@@ -49,16 +49,19 @@ void CollectScans(LogicalOperator &op, vector<reference<LogicalGet>> &scans) {
 	}
 }
 
-//! The file list of a query's only scan, planned without the optimizer: the cardinality estimate would load every
-//! partition, which the planner skips for a limit-bound scan
+//! The file list of a query's only scan, planned without the optimizer and marked limit bound as the planner marks
+//! a scan under a LIMIT: the cardinality estimate would load every partition, which the planner skips for such a scan
 class PlannedList {
 public:
-	PlannedList(Connection &con, const string &query) {
+	PlannedList(Connection &con, const string &query, bool limit_bound) {
 		plan = con.ExtractPlan(query);
 		vector<reference<LogicalGet>> scans;
 		CollectScans(*plan, scans);
 		REQUIRE(scans.size() == 1);
 		list = &scans[0].get().bind_data->Cast<MultiFileBindData>().file_list->Cast<HiveMultiFileList>();
+		if (limit_bound) {
+			list->SetLimitBound();
+		}
 	}
 
 public:
@@ -82,7 +85,7 @@ public:
 
 private:
 	unique_ptr<LogicalOperator> plan;
-	optional_ptr<const HiveMultiFileList> list;
+	optional_ptr<HiveMultiFileList> list;
 };
 
 //! The message 'read' fails with, empty when it does not
@@ -160,22 +163,16 @@ void SetUp(Connection &con) {
 	Run(con, "PRAGMA disable_optimizer");
 }
 
-void LimitBound(Connection &con, bool limit_bound) {
-	Run(con, string("SET VARIABLE glue_test_limit_bound_scans = ") + (limit_bound ? "true" : "false"));
-}
-
 //! Every file of the table with its partition's values, listed without paging in a transaction of its own: the
 //! partitions it loads stay in the transaction's cache, from which a scan takes them instead of paging
 std::map<string, vector<string>> Reference(Connection &con, const string &table) {
-	LimitBound(con, false);
 	Run(con, "BEGIN");
 	std::map<string, vector<string>> result;
 	{
-		PlannedList reference(con, "SELECT * FROM " + table);
+		PlannedList reference(con, "SELECT * FROM " + table, false);
 		result = reference.AllAttributed();
 	}
 	Run(con, "COMMIT");
-	LimitBound(con, true);
 	return result;
 }
 
@@ -204,7 +201,7 @@ TEST_CASE("A limit-bound scan lists its first file with one GetPartitions page a
 
 	Run(con, "BEGIN");
 	SECTION("the first file, as DuckScales' claim asks for it") {
-		PlannedList scan(con, "SELECT * FROM " + table);
+		PlannedList scan(con, "SELECT * FROM " + table, true);
 		StartCounting(con);
 		auto count = scan.List().GetFileCount(1);
 		REQUIRE(count.type == FileExpansionType::NOT_ALL_FILES_KNOWN);
@@ -239,7 +236,7 @@ TEST_CASE("A limit-bound scan lists its first file with one GetPartitions page a
 		REQUIRE(scan.List().GetTotalFileCount() == 120);
 	}
 	SECTION("a limit of at least the table's rows pages through every partition") {
-		PlannedList scan(con, "SELECT * FROM " + table);
+		PlannedList scan(con, "SELECT * FROM " + table, true);
 		StartCounting(con);
 		// as the scan asks for files one after another
 		auto count = scan.List().GetFileCount(1000);
@@ -252,8 +249,7 @@ TEST_CASE("A limit-bound scan lists its first file with one GetPartitions page a
 		REQUIRE(scan.AllAttributed() == expected);
 	}
 	SECTION("an unmarked scan loads every partition") {
-		LimitBound(con, false);
-		PlannedList scan(con, "SELECT * FROM " + table);
+		PlannedList scan(con, "SELECT * FROM " + table, false);
 		StartCounting(con);
 		scan.List().GetFileCount(1);
 		REQUIRE(FullLoads(con) == 1);
@@ -293,7 +289,7 @@ TEST_CASE("A limit-bound scan stops paging at a partition with files in a subdir
 	REQUIRE(expected[a + "/deeper/a.parquet"] == vector<string> {"a"});
 
 	Run(con, "BEGIN");
-	PlannedList scan(con, "SELECT * FROM " + table);
+	PlannedList scan(con, "SELECT * FROM " + table, true);
 	StartCounting(con);
 	scan.List().GetFileCount(1);
 	// 'a' is listed first and has subdirectories: the list stops paging, loads every partition and plans the
@@ -325,21 +321,19 @@ TEST_CASE("A limit-bound scan refuses partitions it pages through at the same lo
 	Run(con, "INSERT INTO " + table + " VALUES (1, 'a')");
 	RegisterPartition(con, "paged", database.name, "t", {"b"}, PartitionLocation(con, table, "a"));
 	SetUp(con);
-	LimitBound(con, false);
 	Run(con, "BEGIN");
 	string expected;
 	{
-		PlannedList reference(con, "SELECT * FROM " + table);
+		PlannedList reference(con, "SELECT * FROM " + table, false);
 		expected = ErrorOf([&]() { reference.List().GetAllFiles(); });
 	}
 	Run(con, "COMMIT");
 	REQUIRE(StringUtil::Contains(expected, "are registered at the same location"));
 
 	// both are on the first page: the paging list sees them and refuses as the full listing does
-	LimitBound(con, true);
 	Run(con, "BEGIN");
 	{
-		PlannedList scan(con, "SELECT * FROM " + table);
+		PlannedList scan(con, "SELECT * FROM " + table, true);
 		StartCounting(con);
 		REQUIRE(ErrorOf([&]() { scan.List().GetFileCount(1); }) == expected);
 		REQUIRE(PlannedListings(con) == 0);
