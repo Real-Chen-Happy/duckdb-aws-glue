@@ -136,8 +136,9 @@ public:
 	const HiveScanInfo &ScanInfo() const {
 		return *scan_info;
 	}
-	HiveScanInfo &ScanInfo() {
-		return *scan_info;
+	//! HiveScanInfo::SetLimitBound for the planner, which reaches the scan info through the bound file list
+	void SetLimitBound() {
+		scan_info->SetLimitBound();
 	}
 	ClientContext &Context() const {
 		return client_context;

@@ -108,8 +108,21 @@ shared_ptr<const vector<GluePartitionInfo>> HivePartitionCache::Cached(ClientCon
 	if (scan.catalog_name.empty()) {
 		return nullptr;
 	}
-	return Resolve(context, GetGlueCatalog(context, scan), scan,
-	               []() { return shared_ptr<const vector<GluePartitionInfo>>(); });
+	auto entry =
+	    query_cache.FindGlueTable(HiveQueryCache::TableKey(scan.catalog_name, scan.database_name, scan.table_name));
+	if (entry) {
+		annotated_lock_guard<annotated_mutex> guard(entry->lock);
+		if (entry->partitions) {
+			return entry->partitions;
+		}
+	}
+	auto transaction_cache = GlueTransactionCache::Of(context, GetGlueCatalog(context, scan));
+	if (!transaction_cache) {
+		return nullptr;
+	}
+	// a load that returns null leaves the entry empty
+	return transaction_cache->GetPartitions(scan.database_name, scan.table_name,
+	                                        []() { return shared_ptr<const vector<GluePartitionInfo>>(); });
 }
 
 void HivePartitionCache::RegisterScan(const shared_ptr<const HiveScanInfo> &scan) {

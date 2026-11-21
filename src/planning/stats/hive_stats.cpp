@@ -605,7 +605,7 @@ void HiveLimitBoundPreOptimize(OptimizerExtensionInput &input, unique_ptr<Logica
 				return;
 			}
 			auto &bind_data = get.bind_data->Cast<MultiFileBindData>();
-			bind_data.file_list->Cast<HiveMultiFileList>().ScanInfo().SetLimitBound();
+			bind_data.file_list->Cast<HiveMultiFileList>().SetLimitBound();
 			return;
 		}
 		default:
