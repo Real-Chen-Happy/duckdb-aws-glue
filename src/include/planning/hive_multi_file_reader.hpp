@@ -177,11 +177,29 @@ public:
 	vector<OpenFileInfo> ListSampleDirectory() const;
 	vector<OpenFileInfo> GetDisplayFileList(optional_idx max_files = optional_idx()) const override;
 	unique_ptr<MultiFileList> Copy() const override;
+	//! Every file: stops paging first, as the segmented load reads every partition faster than pages
+	vector<OpenFileInfo> GetAllFiles() const override;
+	idx_t GetTotalFileCount() const override;
 
 protected:
 	bool ExpandNextPath() const override;
 
 private:
+	//! A list of every partition of a Glue table whose scan is limit bound (HiveScanInfo::LimitBound) pages through the
+	//! partitions while none is loaded: each expansion lists the next partitions of the pages fetched, one listing each
+	//! (the first expansion one partition), and fetches the next page (HiveScanInfo::FetchPartitionPage) when it has
+	//! listed them all. It stops paging, and lists the partitions the pages did not as without
+	//! paging, when a page has a partition with files in a subdirectory (it may be the location of a partition on a
+	//! later page, which owns them), past the last page fetched lazily, or when asked for every file
+	enum class PagingState : uint8_t { UNDECIDED, PAGING, NOT_PAGING };
+	//! Whether the list pages, decided on first use. Called with the list's lock held
+	bool Paging() const;
+	void StopPaging() const;
+	//! List the next partitions of the pages; false when no page is left to fetch lazily or one of them has files in a
+	//! subdirectory
+	bool ExpandNextPage() const;
+	//! The partitions listings index into: those known so far while paging, else all of them
+	shared_ptr<const vector<GluePartitionInfo>> ListedPartitions() const;
 	//! A listing we still have to do: either the table root (covering the partitions under it) or a batch of
 	//! partitions that each get their own listing
 	struct ListingJob {
@@ -191,8 +209,9 @@ private:
 	//! Decide the listings from the partitions to read (once, under the lock)
 	void PlanListings() const;
 	void ListRoot(const vector<idx_t> &partitions) const;
-	//! Lists the directories of 'partition_indexes' in parallel
-	void ListPartitions(const vector<idx_t> &partition_indexes) const;
+	//! Lists the directories of 'partition_indexes' in parallel. With 'direct_only', adds nothing and returns false
+	//! when a data file is in a subdirectory of its partition's location
+	bool ListPartitions(const vector<idx_t> &partition_indexes, bool direct_only = false) const;
 	//! The files of the partitions the fetched pages of the root listing hold completely, fetching more only until
 	//! they hold one of 'partitions'
 	vector<OpenFileInfo> SampleRootPartitions(const vector<idx_t> &partitions) const;
@@ -235,6 +254,13 @@ private:
 	//! which files there are attributed to) to all of them
 	mutable unordered_map<idx_t, vector<idx_t>> shared_locations;
 	mutable bool partition_locations_built = false;
+	mutable PagingState paging = PagingState::UNDECIDED;
+	//! The next page to fetch while paging, and where the pages fetched end (an index into
+	//! HiveScanInfo::KnownPartitions())
+	mutable idx_t next_page = 0;
+	mutable idx_t page_end = 0;
+	//! The partitions below this index were listed page by page, and are not listed again once the list stops paging
+	mutable idx_t paged_partitions = 0;
 };
 
 //! Bind the reader for the file format (read_parquet, read_csv, read_json or read_avro) over the partitions of

@@ -492,6 +492,10 @@ void HiveMultiFileList::PlanListings() const {
 	auto partitions = scan_info->Partitions(client_context);
 	auto indexes = PartitionIndexes();
 	for (auto partition_index : *indexes) {
+		if (partition_index < paged_partitions) {
+			// listed page by page
+			continue;
+		}
 		auto location = ComparableLocation((*partitions)[partition_index].location);
 		// a location with an empty segment below the root ('t//p=x') holds files the root listing leaves out
 		bool empty_segment = location.find("//", root.size() + 1) != string::npos;
@@ -548,11 +552,14 @@ void HiveMultiFileList::PlanListings() const {
 }
 
 void HiveMultiFileList::BuildPartitionLocations() const {
-	if (partition_locations_built) {
+	// while paging, every page adds partitions: built again from those known
+	if (partition_locations_built && paging != PagingState::PAGING) {
 		return;
 	}
 	partition_locations_built = true;
-	auto partitions = scan_info->Partitions(client_context);
+	partition_by_location.clear();
+	shared_locations.clear();
+	auto partitions = ListedPartitions();
 	unordered_map<string, vector<idx_t>> partitions_by_location;
 	for (idx_t i = 0; i < partitions->size(); i++) {
 		auto location = ComparableLocation((*partitions)[i].location);
@@ -583,7 +590,7 @@ void HiveMultiFileList::ThrowIfLocationShared(idx_t owner, const unordered_set<i
 	if (!read) {
 		return;
 	}
-	auto partitions = scan_info->Partitions(client_context);
+	auto partitions = ListedPartitions();
 	// Glue returns partitions in no fixed order (GetPartitions segments): name them in the order of their values
 	vector<idx_t> named = sharing;
 	std::sort(named.begin(), named.end(),
@@ -625,8 +632,8 @@ bool HiveMultiFileList::IsRootListedDataFile(const OpenFileInfo &file, const str
 	return IsDataFile(file, owner.IsValid() ? partitions[owner.GetIndex()].location : root_prefix);
 }
 
-void HiveMultiFileList::ListPartitions(const vector<idx_t> &partition_indexes) const {
-	auto partitions = scan_info->Partitions(client_context);
+bool HiveMultiFileList::ListPartitions(const vector<idx_t> &partition_indexes, bool direct_only) const {
+	auto partitions = ListedPartitions();
 	vector<string> locations;
 	for (auto partition_index : partition_indexes) {
 		auto &partition = (*partitions)[partition_index];
@@ -652,6 +659,15 @@ void HiveMultiFileList::ListPartitions(const vector<idx_t> &partition_indexes) c
 	}
 	executor.ScheduleTasks(std::move(tasks));
 	executor.WorkOnTasks();
+	for (idx_t i = 0; direct_only && i < locations.size(); i++) {
+		auto directory = ComparableLocation(locations[i]) + "/";
+		for (auto &file : listed[i]) {
+			// a data file starts with its listed location (IsDataFile)
+			if (ComparableLocation(file.path).find('/', directory.size()) != string::npos) {
+				return false;
+			}
+		}
+	}
 	PathFilterEvaluator path_evaluator(client_context, path_filters);
 	BuildPartitionLocations();
 	unordered_set<idx_t> reading(partition_indexes.begin(), partition_indexes.end());
@@ -672,6 +688,7 @@ void HiveMultiFileList::ListPartitions(const vector<idx_t> &partition_indexes) c
 			AddFile(std::move(file), optional_idx(partition_indexes[i]));
 		}
 	}
+	return true;
 }
 
 void HiveMultiFileList::AddFile(OpenFileInfo file, optional_idx partition_index) const {
@@ -731,8 +748,107 @@ void HiveMultiFileList::ListRoot(const vector<idx_t> &partitions) const {
 	}
 }
 
+//! Whether the scan is bound by a LIMIT. shortcut: the variable glue_test_limit_bound_scans marks every scan for the
+//! tests until the planner marks scans (SetLimitBound); drop it then
+static bool ScanIsLimitBound(ClientContext &context, const HiveScanInfo &info) {
+	if (info.LimitBound()) {
+		return true;
+	}
+	Value variable;
+	if (!ClientConfig::GetConfig(context).GetUserVariable(string("glue_test_limit_bound_scans"), variable) ||
+	    variable.IsNull()) {
+		return false;
+	}
+	return BooleanValue::Get(variable.DefaultCastAs(LogicalType::BOOLEAN));
+}
+
+bool HiveMultiFileList::Paging() const {
+	if (paging == PagingState::UNDECIDED) {
+		paging = PagingState::NOT_PAGING;
+		bool every_partition;
+		{
+			annotated_lock_guard<annotated_mutex> guard(indexes_lock);
+			every_partition = !partition_indexes;
+		}
+		// partitions a cache holds cost no request
+		if (every_partition && !planned && !scan_info->partition_keys.empty() && !scan_info->catalog_name.empty() &&
+		    ScanIsLimitBound(client_context, *scan_info) && !scan_info->PartitionsLoaded() &&
+		    !HiveQueryCache::Get(client_context)->Partitions().Cached(client_context, *scan_info)) {
+			paging = PagingState::PAGING;
+		}
+	}
+	return paging == PagingState::PAGING;
+}
+
+void HiveMultiFileList::StopPaging() const {
+	if (paging == PagingState::PAGING) {
+		// the locations were indexed for the partitions of the pages
+		partition_locations_built = false;
+	}
+	paging = PagingState::NOT_PAGING;
+}
+
+shared_ptr<const vector<GluePartitionInfo>> HiveMultiFileList::ListedPartitions() const {
+	return paging == PagingState::PAGING ? scan_info->KnownPartitions() : scan_info->Partitions(client_context);
+}
+
+bool HiveMultiFileList::ExpandNextPage() const {
+	GlueScanEvent event(scan_info->Describe(), scan_info->scan_id, "listing");
+	while (paged_partitions >= page_end) {
+		auto end = scan_info->FetchPartitionPage(client_context, next_page);
+		if (!end.IsValid()) {
+			return false;
+		}
+		next_page++;
+		page_end = end.GetIndex();
+	}
+	// the first listing is of one partition, which often holds the rows a LIMIT needs; then as many as are listed
+	// together without paging
+	auto batch = paged_partitions == 0 ? idx_t(1) : PartitionsListedTogether(client_context);
+	auto known = scan_info->KnownPartitions();
+	vector<idx_t> listing;
+	for (auto partition_index = paged_partitions; partition_index < page_end && listing.size() < batch;
+	     partition_index++) {
+		scan_info->VerifyConsistentPartitionSerDe((*known)[partition_index]);
+		listing.push_back(partition_index);
+	}
+	auto files_before = expanded_files.size();
+	if (!ListPartitions(listing, true)) {
+		return false;
+	}
+	paged_partitions += listing.size();
+	event.partitions_read = listing.size();
+	event.files = expanded_files.size() - files_before;
+	event.Finish();
+	event.detail = "page";
+	DUCKDB_LOG(client_context, GlueScanLogType, event);
+	return true;
+}
+
+vector<OpenFileInfo> HiveMultiFileList::GetAllFiles() const {
+	{
+		lock_guard<mutex> lck(lock);
+		StopPaging();
+	}
+	return LazyMultiFileList::GetAllFiles();
+}
+
+idx_t HiveMultiFileList::GetTotalFileCount() const {
+	{
+		lock_guard<mutex> lck(lock);
+		StopPaging();
+	}
+	return LazyMultiFileList::GetTotalFileCount();
+}
+
 bool HiveMultiFileList::ExpandNextPath() const {
 	// called with the list's lock held; runs one listing per call
+	if (Paging()) {
+		if (ExpandNextPage()) {
+			return true;
+		}
+		StopPaging();
+	}
 	PlanListings();
 	if (next_job >= listing_jobs.size()) {
 		return false;
@@ -812,6 +928,10 @@ MultiFileCount HiveMultiFileList::GetFileCount(idx_t min_exact_count) const {
 	if (all_files_expanded) {
 		return MultiFileCount(expanded_files.size(), FileExpansionType::ALL_FILES_EXPANDED);
 	}
+	if (Paging()) {
+		// the partitions are not all known, and planning the listings would load them
+		return MultiFileCount(expanded_files.size() + 1, FileExpansionType::NOT_ALL_FILES_KNOWN);
+	}
 	PlanListings();
 	idx_t remaining = 0;
 	for (idx_t i = next_job; i < listing_jobs.size(); i++) {
@@ -822,6 +942,8 @@ MultiFileCount HiveMultiFileList::GetFileCount(idx_t min_exact_count) const {
 
 vector<OpenFileInfo> HiveMultiFileList::ListSampleDirectory() const {
 	lock_guard<mutex> lck(lock);
+	// the sample measures the table as the listings plan it
+	StopPaging();
 	PlanListings();
 	vector<OpenFileInfo> files;
 	if (scan_info->partition_keys.empty()) {
