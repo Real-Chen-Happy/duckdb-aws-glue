@@ -476,6 +476,10 @@ unique_ptr<BaseStatistics> HivePartitionStatistics(ClientContext &context, Table
 	auto &bind_data = input.bind_data->Cast<MultiFileBindData>();
 	auto &hive_list = bind_data.file_list->Cast<HiveMultiFileList>();
 	auto &info = hive_list.ScanInfo();
+	if (info.IsLimitBound() && !info.PartitionsLoaded()) {
+		// as in HiveScanCardinality: reading footers or partitions for a scan that reads a few rows only costs time
+		return nullptr;
+	}
 
 	// the column is a partition key only when it is a whole top-level column of the table
 	idx_t key_index = DConstants::INVALID_INDEX;
