@@ -1,6 +1,5 @@
 #pragma once
 
-#include "duckdb/common/atomic.hpp"
 #include "duckdb/common/error_data.hpp"
 #include "duckdb/common/multi_file/multi_file_list.hpp"
 #include "duckdb/common/multi_file/multi_file_reader.hpp"
@@ -96,12 +95,13 @@ struct HiveScanInfo : public TableFunctionInfo {
 	bool PartitionsLoaded() const;
 	void SetPartitions(vector<GluePartitionInfo> partitions_p);
 	void SetPartitions(shared_ptr<const vector<GluePartitionInfo>> partitions_p);
-	//! Set before the optimizers run (HiveLimitBoundPreOptimize) when only a constant LIMIT (and OFFSET) and
-	//! projections sit above the scan: the scan needs a few rows, so no estimate is worth loading partitions for
+
+	//! Set before the optimizers when only a constant LIMIT (and OFFSET) and projections sit above the scan: the query
+	//! needs only some of its rows. Off unless set
 	void SetLimitBound() {
 		limit_bound = true;
 	}
-	bool IsLimitBound() const {
+	bool LimitBound() const {
 		return limit_bound;
 	}
 
@@ -113,7 +113,7 @@ private:
 private:
 	mutable annotated_mutex partitions_lock;
 	mutable shared_ptr<const vector<GluePartitionInfo>> partitions DUCKDB_GUARDED_BY(partitions_lock);
-	atomic<bool> limit_bound {false};
+	bool limit_bound = false;
 };
 
 //! The data files of a Hive table, listed lazily: nothing is listed until the scan asks for files, and the filters on

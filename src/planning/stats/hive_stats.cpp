@@ -383,7 +383,7 @@ unique_ptr<MultiFileBindData> HiveScanInfo::FooterStatisticsBindData(ClientConte
 //! Nothing above a limit-bound scan uses its estimates: they are only worth giving when no partition, sample or
 //! footer has to be read for them
 static bool SkipsEstimate(ClientContext &context, const HiveScanInfo &info) {
-	if (!info.IsLimitBound() || info.PartitionsLoaded()) {
+	if (!info.LimitBound() || info.PartitionsLoaded()) {
 		return false;
 	}
 	return info.partition_keys.empty() || !HiveQueryCache::Get(context)->Partitions().Cached(context, info);
