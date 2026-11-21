@@ -3,6 +3,7 @@
 #include "duckdb/common/open_file_info.hpp"
 #include "duckdb/common/optional_idx.hpp"
 #include "duckdb/function/table_function.hpp"
+#include "duckdb/optimizer/optimizer_extension.hpp"
 #include "duckdb/storage/statistics/node_statistics.hpp"
 
 namespace duckdb {
@@ -19,5 +20,8 @@ idx_t HiveFooterStatisticsMaxFiles(ClientContext &context);
 unique_ptr<NodeStatistics> HiveScanCardinality(ClientContext &context, const FunctionData *bind_data_p);
 //! Partition columns are answered from the partition values, every other column by the format's own function
 unique_ptr<BaseStatistics> HivePartitionStatistics(ClientContext &context, TableFunctionGetStatisticsInput &input);
+//! Marks a Hive scan limit-bound (HiveScanInfo::SetLimitBound) when only projections and a constant LIMIT, with an
+//! optional constant OFFSET, sit above it. Runs before the optimizers, so before anything asks for a cardinality
+void HiveLimitBoundPreOptimize(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan);
 
 } // namespace duckdb

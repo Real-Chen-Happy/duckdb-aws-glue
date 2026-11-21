@@ -12,6 +12,8 @@
 #include "duckdb/common/unordered_map.hpp"
 #include "duckdb/common/unordered_set.hpp"
 #include "duckdb/logging/logger.hpp"
+#include "duckdb/planner/operator/logical_get.hpp"
+#include "duckdb/planner/operator/logical_limit.hpp"
 #include "duckdb/storage/statistics/base_statistics.hpp"
 #include "api/glue_api.hpp"
 #include "catalog/glue_catalog.hpp"
@@ -385,6 +387,10 @@ unique_ptr<NodeStatistics> HiveScanCardinality(ClientContext &context, const Fun
 	auto &bind_data = bind_data_p->Cast<MultiFileBindData>();
 	auto &hive_list = bind_data.file_list->Cast<HiveMultiFileList>();
 	auto &info = hive_list.ScanInfo();
+	if (info.IsLimitBound() && !info.PartitionsLoaded()) {
+		// Nothing above the scan uses the estimate: loading the partitions and sampling them would only cost time
+		return nullptr;
+	}
 	// pruning has already happened by the time the cardinality is asked for, so these are the partitions read
 	auto partitions = info.partition_keys.empty() ? idx_t(1) : hive_list.PartitionIndexes()->size();
 	if (partitions == 0) {
@@ -535,6 +541,53 @@ unique_ptr<BaseStatistics> HivePartitionStatistics(ClientContext &context, Table
 	// every value of the column is a partition value, so the count is exact rather than estimated
 	result->SetDistinctCount(distinct_values.size());
 	return result;
+}
+
+//===--------------------------------------------------------------------===//
+// Limit-bound scans
+//===--------------------------------------------------------------------===//
+static bool IsConstantLimit(const LogicalLimit &limit) {
+	if (limit.limit_val.Type() != LimitNodeType::CONSTANT_VALUE) {
+		return false;
+	}
+	auto offset_type = limit.offset_val.Type();
+	return offset_type == LimitNodeType::UNSET || offset_type == LimitNodeType::CONSTANT_VALUE;
+}
+
+void HiveLimitBoundPreOptimize(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan) {
+	// Walk down the single chain from the root. Every other operator (a filter, join, aggregate, ORDER BY, DISTINCT,
+	// window, sample, union, unnest, CTE, ...) can need more rows than the limit, or uses the estimate.
+	bool below_limit = false;
+	optional_ptr<LogicalOperator> op = plan.get();
+	while (op) {
+		switch (op->type) {
+		case LogicalOperatorType::LOGICAL_EXPLAIN:
+		case LogicalOperatorType::LOGICAL_PROJECTION:
+			break;
+		case LogicalOperatorType::LOGICAL_LIMIT:
+			if (!IsConstantLimit(op->Cast<LogicalLimit>())) {
+				return;
+			}
+			below_limit = true;
+			break;
+		case LogicalOperatorType::LOGICAL_GET: {
+			auto &get = op->Cast<LogicalGet>();
+			if (!below_limit || get.function.cardinality != HiveScanCardinality || !get.bind_data ||
+			    !get.table_filters.filters.empty() || !op->children.empty()) {
+				return;
+			}
+			auto &bind_data = get.bind_data->Cast<MultiFileBindData>();
+			bind_data.file_list->Cast<HiveMultiFileList>().ScanInfo().SetLimitBound();
+			return;
+		}
+		default:
+			return;
+		}
+		if (op->children.size() != 1) {
+			return;
+		}
+		op = op->children[0].get();
+	}
 }
 
 } // namespace duckdb

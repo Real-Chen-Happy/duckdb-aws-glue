@@ -202,6 +202,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 	}
 	// ATTACH '<catalog id>' (TYPE GLUE)
 	StorageExtension::Register(config, "glue", make_shared_ptr<GlueStorageExtension>());
+	// Marks limit-bound Hive scans before any optimizer asks for their cardinality
+	OptimizerExtension limit_bound;
+	limit_bound.pre_optimize_function = HiveLimitBoundPreOptimize;
+	OptimizerExtension::Register(config, std::move(limit_bound));
 
 	loader.RegisterFunction(GetGlueGetTableResponseFunction());
 	loader.RegisterFunction(GetGlueGetDatabaseResponseFunction());
