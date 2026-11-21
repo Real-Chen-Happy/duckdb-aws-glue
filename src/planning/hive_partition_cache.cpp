@@ -103,6 +103,15 @@ shared_ptr<const vector<GluePartitionInfo>> HivePartitionCache::Get(ClientContex
 	});
 }
 
+shared_ptr<const vector<GluePartitionInfo>> HivePartitionCache::Cached(ClientContext &context,
+                                                                       const HiveScanInfo &scan) {
+	if (scan.catalog_name.empty()) {
+		return nullptr;
+	}
+	return Resolve(context, GetGlueCatalog(context, scan), scan,
+	               []() { return shared_ptr<const vector<GluePartitionInfo>>(); });
+}
+
 void HivePartitionCache::RegisterScan(const shared_ptr<const HiveScanInfo> &scan) {
 	annotated_lock_guard<annotated_mutex> guard(prefetch_lock);
 	registered_scans.push_back(scan);

@@ -22,6 +22,9 @@ public:
 	//! The partitions of the table 'scan' reads, loaded from Glue unless a cache holds them. The first call prefetches
 	//! the tables of the registered scans first
 	shared_ptr<const vector<GluePartitionInfo>> Get(ClientContext &context, const HiveScanInfo &scan);
+	//! The partitions of the table 'scan' reads when the query's or the transaction's cache holds them, else null:
+	//! loads and prefetches nothing
+	shared_ptr<const vector<GluePartitionInfo>> Cached(ClientContext &context, const HiveScanInfo &scan);
 	//! Prefetch the table of 'scan' when a scan first needs partitions. Held weakly: a scan the optimizer removes
 	//! before then is destroyed with its bind data, and its table is not prefetched
 	void RegisterScan(const shared_ptr<const HiveScanInfo> &scan);

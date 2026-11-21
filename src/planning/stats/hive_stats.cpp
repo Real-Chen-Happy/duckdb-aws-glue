@@ -380,6 +380,15 @@ unique_ptr<MultiFileBindData> HiveScanInfo::FooterStatisticsBindData(ClientConte
 	return result;
 }
 
+//! Nothing above a limit-bound scan uses its estimates: they are only worth giving when no partition, sample or
+//! footer has to be read for them
+static bool SkipsEstimate(ClientContext &context, const HiveScanInfo &info) {
+	if (!info.IsLimitBound() || info.PartitionsLoaded()) {
+		return false;
+	}
+	return info.partition_keys.empty() || !HiveQueryCache::Get(context)->Partitions().Cached(context, info);
+}
+
 //! Cardinality of a Hive scan: the files listed for the table, measured once per query, scaled to the partitions
 //! this scan reads. Replaces a constant: without it a 40-row dimension table and a 200,000-row fact table cost the
 //! same, and csv and json are estimated at one row.
@@ -387,8 +396,7 @@ unique_ptr<NodeStatistics> HiveScanCardinality(ClientContext &context, const Fun
 	auto &bind_data = bind_data_p->Cast<MultiFileBindData>();
 	auto &hive_list = bind_data.file_list->Cast<HiveMultiFileList>();
 	auto &info = hive_list.ScanInfo();
-	if (info.IsLimitBound() && !info.PartitionsLoaded()) {
-		// Nothing above the scan uses the estimate: loading the partitions and sampling them would only cost time
+	if (SkipsEstimate(context, info)) {
 		return nullptr;
 	}
 	// pruning has already happened by the time the cardinality is asked for, so these are the partitions read
@@ -476,8 +484,7 @@ unique_ptr<BaseStatistics> HivePartitionStatistics(ClientContext &context, Table
 	auto &bind_data = input.bind_data->Cast<MultiFileBindData>();
 	auto &hive_list = bind_data.file_list->Cast<HiveMultiFileList>();
 	auto &info = hive_list.ScanInfo();
-	if (info.IsLimitBound() && !info.PartitionsLoaded()) {
-		// as in HiveScanCardinality: reading footers or partitions for a scan that reads a few rows only costs time
+	if (SkipsEstimate(context, info)) {
 		return nullptr;
 	}
 
@@ -577,7 +584,7 @@ void HiveLimitBoundPreOptimize(OptimizerExtensionInput &input, unique_ptr<Logica
 		case LogicalOperatorType::LOGICAL_GET: {
 			auto &get = op->Cast<LogicalGet>();
 			if (!below_limit || get.function.cardinality != HiveScanCardinality || !get.bind_data ||
-			    !get.table_filters.filters.empty() || !op->children.empty()) {
+			    get.table_filters.HasFilters() || get.table_filters.HasMultiColumnFilters() || !op->children.empty()) {
 				return;
 			}
 			auto &bind_data = get.bind_data->Cast<MultiFileBindData>();
