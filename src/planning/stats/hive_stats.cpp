@@ -12,6 +12,8 @@
 #include "duckdb/common/unordered_map.hpp"
 #include "duckdb/common/unordered_set.hpp"
 #include "duckdb/logging/logger.hpp"
+#include "duckdb/planner/expression/bound_function_expression.hpp"
+#include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/planner/operator/logical_limit.hpp"
 #include "duckdb/storage/statistics/base_statistics.hpp"
@@ -565,6 +567,17 @@ static bool IsConstantLimit(const LogicalLimit &limit) {
 	return offset_type == LimitNodeType::UNSET || offset_type == LimitNodeType::CONSTANT_VALUE;
 }
 
+//! stats() shows the statistics a limit-bound scan would leave out
+static bool ShowsStatistics(const LogicalOperator &projection) {
+	bool shows = false;
+	for (auto &expression : projection.expressions) {
+		ExpressionIterator::VisitExpression<BoundFunctionExpression>(
+		    *expression,
+		    [&](const BoundFunctionExpression &fun) { shows = shows || fun.Function().GetName() == "stats"; });
+	}
+	return shows;
+}
+
 void HiveLimitBoundPreOptimize(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan) {
 	// Walk down the single chain from the root. Every other operator (a filter, join, aggregate, ORDER BY, DISTINCT,
 	// window, sample, union, unnest, CTE, ...) can need more rows than the limit, or uses the estimate.
@@ -573,7 +586,11 @@ void HiveLimitBoundPreOptimize(OptimizerExtensionInput &input, unique_ptr<Logica
 	while (op) {
 		switch (op->type) {
 		case LogicalOperatorType::LOGICAL_EXPLAIN:
+			break;
 		case LogicalOperatorType::LOGICAL_PROJECTION:
+			if (ShowsStatistics(*op)) {
+				return;
+			}
 			break;
 		case LogicalOperatorType::LOGICAL_LIMIT:
 			if (!IsConstantLimit(op->Cast<LogicalLimit>())) {

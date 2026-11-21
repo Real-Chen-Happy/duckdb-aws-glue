@@ -339,6 +339,20 @@ SELECT count(*) FILTER (event = 'partitions') > 0 FROM duckdb_logs_parsed('GlueS
 ----
 true
 
+# stats() shows the statistics, so they are read as before
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT stats(dt)::VARCHAR FROM lbs.default.lbs_parts LIMIT 1;
+----
+{'has_no_null': true, 'has_null': true, 'has_unicode': true}
+
+query I
+SELECT count(*) FILTER (event = 'partitions') > 0 FROM duckdb_logs_parsed('GlueScan');
+----
+true
+
 # the rows of the shapes above are the scan's own
 query II rowsort
 SELECT * FROM lbs.default.lbs_parts WHERE id > 1 LIMIT 5;
