@@ -339,7 +339,18 @@ SELECT count(*) FILTER (event = 'partitions') > 0 FROM duckdb_logs_parsed('GlueS
 ----
 true
 
-# stats() shows the statistics, so they are read as before
+# stats() shows the statistics, so they are read as before, also under a cast
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+EXPLAIN SELECT stats(dt)::VARCHAR FROM lbs.default.lbs_parts LIMIT 1;
+
+query I
+SELECT planning_cost() != '0 0 0 0';
+----
+true
+
 statement ok
 CALL truncate_duckdb_logs();
 

@@ -567,15 +567,26 @@ static bool IsConstantLimit(const LogicalLimit &limit) {
 	return offset_type == LimitNodeType::UNSET || offset_type == LimitNodeType::CONSTANT_VALUE;
 }
 
+//! A cast is a function too, so the children of every function are searched
+static bool CallsStats(const Expression &expression) {
+	if (expression.GetExpressionClass() == ExpressionClass::BOUND_FUNCTION &&
+	    expression.Cast<BoundFunctionExpression>().Function().GetName() == "stats") {
+		return true;
+	}
+	bool calls = false;
+	ExpressionIterator::EnumerateChildren(expression,
+	                                      [&](const Expression &child) { calls = calls || CallsStats(child); });
+	return calls;
+}
+
 //! stats() shows the statistics a limit-bound scan would leave out
 static bool ShowsStatistics(const LogicalOperator &projection) {
-	bool shows = false;
 	for (auto &expression : projection.expressions) {
-		ExpressionIterator::VisitExpression<BoundFunctionExpression>(
-		    *expression,
-		    [&](const BoundFunctionExpression &fun) { shows = shows || fun.Function().GetName() == "stats"; });
+		if (CallsStats(*expression)) {
+			return true;
+		}
 	}
-	return shows;
+	return false;
 }
 
 void HiveLimitBoundPreOptimize(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan) {
