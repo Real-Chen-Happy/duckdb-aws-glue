@@ -1,5 +1,5 @@
 # name: test/sql/hive/hive_scan/limit_bound_scan.test
-# description: SELECT * ... LIMIT n on a partitioned table pages through its partitions: LIMIT 1 costs one GetPartitions page of 10 partitions and one listing (when nothing opens files ahead of the scan), a LIMIT past the table's rows pages through every partition and returns every row, and a scan the planner does not mark loads every partition. test/unittest/hive_lazy_partitions_test.cpp tests the paging itself
+# description: SELECT * ... LIMIT n on a partitioned table pages through its partitions: LIMIT 1 costs one GetPartitions page of 10 partitions and one listing, with DuckDB's progress bar and read-ahead on, a LIMIT past the table's rows pages through every partition and returns every row, and a scan the planner does not mark loads every partition. test/unittest/hive_lazy_partitions_test.cpp tests the paging itself
 # group: [hive_scan]
 
 require httpfs
@@ -59,31 +59,10 @@ CREATE TEMP MACRO scan_cost() AS (
            ' ' || (SELECT count(*) FROM duckdb_logs_parsed('HTTP') WHERE request.url LIKE '%list-type=2%')
     FROM duckdb_logs_parsed('GlueScan'));
 
-# ---- LIMIT 1 with DuckDB's defaults: files opened ahead page further, but never load every partition --------------
-
-statement ok
-CALL truncate_duckdb_logs();
-
-query I
-SELECT k = 'p' || lpad(id::VARCHAR, 2, '0') FROM paged.fault_paged_partitions_limit.t LIMIT 1;
-----
-true
-
-query I
-SELECT split_part(scan_cost(), ' ', 3);
-----
-0
-
 # ---- LIMIT 1: the first page and the first partition's listing ---------------------------------------------------
 
-# the progress bar (GetFileCount(100)) and the scan's read-ahead (it opens files ahead of decoding) ask for more files
-# than the LIMIT needs, and the list pages to give them
-statement ok
-SET enable_progress_bar = false;
-
-statement ok
-SET read_ahead_depth = 0;
-
+# with DuckDB's defaults: the sqllogictest runner turns the progress bar on, and the scan reads ahead. Neither asks a
+# limit-bound scan for files the LIMIT does not need
 statement ok
 CALL truncate_duckdb_logs();
 
@@ -98,11 +77,25 @@ SELECT scan_cost();
 ----
 1 10 0 1 1
 
+# with more threads to open files ahead
 statement ok
-RESET enable_progress_bar;
+SET threads = 16;
 
 statement ok
-RESET read_ahead_depth;
+CALL truncate_duckdb_logs();
+
+query I
+SELECT k = 'p' || lpad(id::VARCHAR, 2, '0') FROM paged.fault_paged_partitions_limit.t LIMIT 1;
+----
+true
+
+query I
+SELECT scan_cost();
+----
+1 10 0 1 1
+
+statement ok
+RESET threads;
 
 # ---- a LIMIT past the table's rows: every page, every row ---------------------------------------------------------
 

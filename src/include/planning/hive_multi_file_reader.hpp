@@ -58,6 +58,10 @@ struct HiveScanInfo : public TableFunctionInfo {
 	//! stay in the plan while filter_pushdown stays enabled for the join filters that prune partitions. Null when the
 	//! reader has none.
 	table_function_pushdown_complex_filter_t format_pushdown_complex_filter = nullptr;
+	//! The init_global and progress functions of the bound file format reader, which BindHiveScan wraps so a
+	//! limit-bound scan lists no files ahead of the rows it needs
+	table_function_init_global_t format_init_global = nullptr;
+	table_function_progress_t format_progress = nullptr;
 	//! The named parameters BindHiveScan bound the file format reader with, which read any of the data files
 	named_argument_map_t reader_parameters;
 

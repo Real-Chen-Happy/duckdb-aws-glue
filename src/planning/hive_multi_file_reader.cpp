@@ -1288,6 +1288,32 @@ static optional_ptr<TableCatalogEntry> HiveScanGetTableEntry(optional_ptr<const 
 	return multi_file_data.multi_file_reader->Cast<HiveMultiFileReader>().ScanInfo().table;
 }
 
+static unique_ptr<GlobalTableFunctionState> HiveScanInitGlobal(ClientContext &context, TableFunctionInitInput &input) {
+	auto &info = input.bind_data->Cast<MultiFileBindData>().multi_file_reader->Cast<HiveMultiFileReader>().ScanInfo();
+	auto result = info.format_init_global(context, input);
+	if (info.LimitBound() && result) {
+		// read-ahead opens files ahead of decoding, which lists partitions the LIMIT does not need. Without it the
+		// scan runs as with read_ahead_depth = 0
+		result->Cast<MultiFileGlobalState>().read_ahead.reset();
+	}
+	return result;
+}
+
+static double HiveScanProgress(ClientContext &context, const FunctionData *bind_data_p,
+                               const GlobalTableFunctionState *global_state) {
+	auto &info = bind_data_p->Cast<MultiFileBindData>().multi_file_reader->Cast<HiveMultiFileReader>().ScanInfo();
+	if (!info.format_progress) {
+		return -1;
+	}
+	// the format's progress lists files until it knows 100 of them; a limit-bound scan reports 0 until it has
+	// listed everything
+	if (info.LimitBound() && global_state->Cast<MultiFileGlobalState>().file_list.GetFileCount().type !=
+	                             FileExpansionType::ALL_FILES_EXPANDED) {
+		return 0;
+	}
+	return info.format_progress(context, bind_data_p, global_state);
+}
+
 static virtual_column_map_t HiveScanGetVirtualColumns(ClientContext &context, optional_ptr<FunctionData> bind_data_p) {
 	auto &bind_data = bind_data_p->Cast<MultiFileBindData>();
 	auto &info = bind_data.multi_file_reader->Cast<HiveMultiFileReader>().ScanInfo();
@@ -1450,6 +1476,10 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 	scan_info->format_cardinality = scan_function.cardinality;
 	scan_function.cardinality = HiveScanCardinality;
 	scan_function.get_table_entry = HiveScanGetTableEntry;
+	scan_info->format_init_global = scan_function.init_global;
+	scan_function.init_global = HiveScanInitGlobal;
+	scan_info->format_progress = scan_function.table_scan_progress;
+	scan_function.table_scan_progress = HiveScanProgress;
 	// EXPLAIN (SQL) shows the scan as the standard reader calls that read its files
 	scan_function.to_sql = HiveScanToSQL;
 	scan_info->format_virtual_columns = scan_function.get_virtual_columns;
